@@ -1,5 +1,7 @@
 package functionaleffects
 
+import scala.concurrent.duration._
+
 // ZIO[R, E, A]
 // R == services required
 // E == how the workflow can fail
@@ -90,10 +92,10 @@ trait YIO[+A] { self =>
 
   def zipWithPar[B, C](that: YIO[B])(f: (A, B) => C): YIO[C] =
     for {
-      left  <- self.fork
+      left <- self.fork
       right <- that.fork
-      a     <- left.join
-      b     <- right.join
+      a <- left.join
+      b <- right.join
     } yield f(a, b)
 
 }
@@ -103,17 +105,45 @@ object YIO {
   def async[A](register: (YIO[A] => Unit) => Any): YIO[A] =
     Async(register)
 
+  private lazy val scheduler: java.util.concurrent.ScheduledExecutorService = {
+    java.util.concurrent.Executors
+      .newSingleThreadScheduledExecutor { (r: Runnable) =>
+        val t = new Thread(r)
+        t.setDaemon(true)
+        t
+      }
+  }
+
+  import scala.concurrent.duration.FiniteDuration
+
+  def sleep(duration: FiniteDuration): YIO[Unit] =
+    YIO.async { cb =>
+      val schedule =
+        scheduler.schedule(
+          (() => cb(YIO.unit)): Runnable,
+          duration.length,
+          duration.unit
+        )
+    }
+
   def collectAll[A](yios: List[YIO[A]]): YIO[List[A]] =
-    ???
+    yios.foldRight(YIO.succeed(List.empty[A])) { case (yio, result) =>
+      result.zipWith(yio)((list, a) => a :: list)
+    }
 
   def collectAllPar[A](yios: List[YIO[A]]): YIO[List[A]] =
-    ???
+    collectAll(yios.map(_.fork)).flatMap { fibers =>
+      collectAll(fibers.map(_.join))
+    }
 
   def foreach[A, B](as: List[A])(f: A => YIO[B]): YIO[List[B]] =
-    ???
+    collectAll(as.map(f))
 
   def foreachPar[A, B](as: List[A])(f: A => YIO[B]): YIO[List[B]] =
-    ???
+    collectAllPar(as.map(f))
+
+  val never: YIO[Nothing] =
+    async(_ => ())
 
   def succeed[A](value: => A): YIO[A] =
     Succeed(() => value)
@@ -147,10 +177,10 @@ final case class RuntimeFiber[A](yio: YIO[A]) extends Fiber[A] {
   private val inbox =
     new java.util.concurrent.ConcurrentLinkedQueue[FiberMessage]
 
-  private val observers =
+  private[this] val observers =
     scala.collection.mutable.Set[YIO[Any] => Unit]()
 
-  private var exit: A =
+  private[this] var exit: A =
     null.asInstanceOf[A]
 
   def offerToInbox(fiberMessage: FiberMessage): Unit = {
@@ -235,6 +265,62 @@ object FiberMessage {
   case object Start extends FiberMessage
 }
 
+sealed trait Promise[A] {
+  def await: YIO[A]
+  def succeed(a: A): YIO[Boolean]
+}
+
+object Promise {
+
+  def make[A]: YIO[Promise[A]] =
+    YIO.succeed {
+      val state =
+        new java.util.concurrent.atomic.AtomicReference[State[A]](Empty(Nil))
+      new Promise[A] {
+        def await: YIO[A] =
+          YIO.async { cb =>
+            var loop = true
+            while (loop) {
+              val currentState = state.get
+              currentState match {
+                case Done(a) =>
+                  loop = false
+                  cb(YIO.succeed(a))
+                case Empty(callbacks) =>
+                  if (state.compareAndSet(currentState, Empty(cb :: callbacks))) {
+                    loop = false
+                  }
+              }
+            }
+          }
+        def succeed(a: A): YIO[Boolean] =
+          YIO.succeed {
+            var loop = true
+            var result = false
+            while (loop) {
+              val currentState = state.get
+              currentState match {
+                case Done(_) =>
+                  loop = false
+                case Empty(joiners) =>
+                  if (state.compareAndSet(currentState, Done(a))) {
+                    joiners.foreach(_(YIO.succeed(a)))
+                    result = true
+                    loop = false
+                  }
+              }
+            }
+            result
+          }
+      }
+    }
+
+  sealed trait State[A]
+
+  final case class Done[A](value: A) extends State[A]
+  final case class Empty[A](joiners: List[YIO[A] => Unit]) extends State[A]
+}
+
 object Example extends App {
 
   val sayHello =
@@ -257,8 +343,15 @@ object Example extends App {
 
   val parallel =
     left.zipWithPar(right)((left, right) => (left, right)).flatMap { out =>
-      YIO.succeed(println(out))  
+      YIO.succeed(println(out))
     }
 
-  parallel.unsafeRunSync()
+  val sleepExample =
+    YIO.sleep(5.seconds)
+
+  trait Runtime {
+    def unsafeRun[A](yio: YIO[A]): A
+  }
+
+  sleepExample.unsafeRunSync()
 }

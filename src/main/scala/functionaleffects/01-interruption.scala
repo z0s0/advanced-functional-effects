@@ -376,7 +376,15 @@ object Graduation extends ZIOSpecDefault {
        */
       test("ensuring") {
         def withFinalizer[R, E, A](zio: ZIO[R, E, A])(finalizer: UIO[Any]): ZIO[R, E, A] =
-          zio <* finalizer
+          ZIO.uninterruptibleMask { restore =>
+            restore(zio).foldCauseZIO(
+              cause => finalizer.foldCauseZIO(
+                cause2 => ZIO.refailCause(cause ++ cause2),
+                _ => ZIO.refailCause(cause)
+              ),
+              a => finalizer *> ZIO.succeed(a),
+            )
+          }
 
         for {
           latch   <- Promise.make[Nothing, Unit]
@@ -387,7 +395,7 @@ object Graduation extends ZIOSpecDefault {
           _       <- fiber.interrupt
           v       <- ref.get
         } yield assertTrue(v)
-      } @@ ignore +
+      } +
         /**
          * CHOICE 2
          *
@@ -398,7 +406,14 @@ object Graduation extends ZIOSpecDefault {
           def acquireReleaseWith[R, E, A, B](
             acquire: ZIO[R, E, A]
           )(release: A => UIO[Any])(use: A => ZIO[R, E, B]): ZIO[R, E, B] =
-            acquire.flatMap(a => use(a) <* release(a))
+            ZIO.uninterruptibleMask { restore =>
+              acquire.flatMap(resource =>
+                restore(use(resource)).foldCauseZIO(
+                  cause => release(resource) *> ZIO.failCause(cause),
+                  success => release(resource) *> ZIO.succeed(success)
+                )
+              )
+            }
 
           for {
             latch   <- Promise.make[Nothing, Unit]
@@ -412,5 +427,43 @@ object Graduation extends ZIOSpecDefault {
             v <- ref.get
           } yield assertTrue(v)
         }
+    }
+}
+
+object ResourceExample extends ZIOAppDefault {
+
+  val acquire1 =
+    ZIO.debug("Acquiring resource 1").as(42)
+
+  val release1 =
+    ZIO.debug("Releasing resource 1")
+
+  val acquire2 =
+    ZIO.debug("Acquiring resource 2").as(43)
+
+  val release2 =
+    ZIO.debug("Releasing resource 2")
+
+  val myResource1: ZIO[Scope, Nothing, Int] =
+    ZIO.acquireRelease(acquire1)(_ => release1)
+
+  val myResource2: ZIO[Scope, Nothing, Int] =
+    ZIO.acquireRelease(acquire2)(_ => release2)
+
+  val myResource3: ZIO[Scope, Nothing, (Int, Int)] =
+    for {
+      r1 <- myResource1
+      _  <- ZIO.debug("in between acquiring resources")
+      r2 <- myResource2
+    } yield (r1, r2)
+
+// Acquiring resource 1
+// Acquiring resource 2
+// Releasing resource 2
+// Releasing resource 1
+
+  val run =
+    ZIO.scoped {
+      myResource3
     }
 }

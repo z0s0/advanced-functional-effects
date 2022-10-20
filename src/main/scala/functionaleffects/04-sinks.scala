@@ -17,6 +17,26 @@ import zio.stream._
 import zio.test._
 import zio.test.TestAspect._
 
+// R is the "services" that the sink needs to run
+// E is the error that the sink can fail with
+// In is the input that the sink knows how to handle
+// L is the type of the leftovers that the sink can produce
+// Z is the summary value that the sink produces
+
+// final class ZSink[-R, +E, -In, +L, +Z]
+
+object SinkExample extends ZIOAppDefault {
+
+  val stream = ZStream.fromIterable(1 to 10).rechunk(10)
+
+  val sink = ZSink.collectAll[Int]
+  // Got chunk that has ten elements
+  // Sink takes first five elements and put them into a chunk
+
+  val run =
+    ???
+}
+
 object Constructors extends ZIOSpecDefault {
   def spec =
     suite("Constructors") {
@@ -24,15 +44,15 @@ object Constructors extends ZIOSpecDefault {
       /**
        * EXERCISE
        *
-       * Replace the call to `.runSum` by a call to `run` using `ZSink.count`.
+       * Replace the call to `.runCount` by a call to `run` using `ZSink.count`.
        */
       test("count") {
         val stream = ZStream(1, 2, 3, 4)
 
         for {
-          size <- stream.runSum
+          size <- stream.run(ZSink.count)
         } yield assertTrue(size.toInt == 4)
-      } @@ ignore +
+      } +
         /**
          * EXERCISE
          *
@@ -43,9 +63,9 @@ object Constructors extends ZIOSpecDefault {
           val stream = ZStream(1, 2, 3, 4)
 
           for {
-            two <- stream.runCollect
+            two <- stream.run(ZSink.take(2))
           } yield assertTrue(two == Chunk(1, 2))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -56,12 +76,15 @@ object Constructors extends ZIOSpecDefault {
         test("foreach") {
           val stream = ZStream(1, 2, 3, 4)
 
+          def incrementRefSink(ref: Ref[Int]): ZSink[Any, Nothing, Int, Nothing, Unit] =
+            ZSink.foreach(v => ref.update(_ + v))
+
           for {
             ref <- Ref.make(0)
-            _   <- stream.runDrain
+            _   <- stream.run(incrementRefSink(ref))
             v   <- ref.get
           } yield assertTrue(v == 10)
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -72,10 +95,13 @@ object Constructors extends ZIOSpecDefault {
         test("foldLeft") {
           val stream = ZStream(1, 2, 3, 4)
 
+          val productSink =
+            ZSink.foldLeft[Int, Int](1)(_ * _)
+
           for {
-            value <- stream.runSum
+            value <- stream.runFold(1)(_ * _)
           } yield assertTrue(value == 24)
-        } @@ ignore
+        }
     }
 }
 
@@ -96,9 +122,9 @@ object Operators extends ZIOSpecDefault {
         val stream = ZStream(1, 2, 3, 4)
 
         for {
-          value <- stream.runCount
+          value <- stream.run(sink)
         } yield assertTrue(value == 4)
-      } @@ ignore +
+      } +
         /**
          * EXERCISE
          *
@@ -107,14 +133,30 @@ object Operators extends ZIOSpecDefault {
          */
         test("zipPar") {
           def zippedSink: ZSink[Any, Nothing, Int, Nothing, (Long, Int)] =
-            ???
+            ZSink.count.zipPar(ZSink.sum[Int])
+
+          def loggingSink(span: String): ZSink[Any, Nothing, Any, Nothing, Any] =
+            ZSink.logSpan(span)(ZSink.foreach(in => ZIO.logInfo(in.toString)))
+
+          val averageSink: ZSink[Any, Nothing, Int, Nothing, Double] =
+            ZSink.count.zipPar(ZSink.sum[Int]).map {
+              case (count, sum) => sum.toDouble / count
+            }
+
+          val myFancySink: ZSink[Any, Nothing, Int, Nothing, Double] =
+            averageSink zipParLeft loggingSink("fancySink")
+            // ZSink.foldLeft[Int, (Long, Int)]((0L, 0)) {
+            //   case ((count, sum), value) => (count + 1L, sum + value)
+            // }
+            // ZSink.sum
+            // ZSink.count
 
           val stream = ZStream(1, 2, 3, 4)
 
           for {
             value <- stream.run(zippedSink)
           } yield assertTrue(value == (4L, 10))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -123,14 +165,14 @@ object Operators extends ZIOSpecDefault {
          */
         test("zip") {
           def zippedSink: ZSink[Any, Nothing, Int, Int, (Chunk[Int], Chunk[Int])] =
-            ???
+            ZSink.take[Int](3).zip(ZSink.collectAll[Int])
 
           val stream = ZStream(1, 2, 3, 4)
 
           for {
             value <- stream.run(zippedSink)
           } yield assertTrue(value == (Chunk(1, 2, 3), Chunk(4)))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -140,17 +182,17 @@ object Operators extends ZIOSpecDefault {
         test("flatMap") {
           val sink =
             for {
-              two       <- ZSink.collectAll[Int]
-              three     <- ZSink.collectAll[Int]
-              remainder <- ZSink.collectAll[Int]
-            } yield (two, three, remainder)
+              size       <- ZSink.head[Int].map(_.get)
+              three      <- ZSink.take[Int](size)
+              threeAgain <- ZSink.take[Int](size)
+            } yield (three, threeAgain)
 
-          val stream = ZStream(1, 2, 3, 4, 5, 6)
+          val stream = ZStream(3, 4, 5, 6, 7, 8, 9)
 
           for {
             chunks <- stream.run(sink)
-          } yield assertTrue(chunks == (Chunk(1, 2), Chunk(3, 4, 5), Chunk(6)))
-        } @@ ignore
+          } yield assertTrue(chunks == (Chunk(4, 5, 6), Chunk(7, 8, 9)))
+        }
     }
 }
 
@@ -171,13 +213,28 @@ object Graduation extends ZIOSpecDefault {
     def create[A](topic: String): Task[PersistentQueue[A]]
   }
 
+  object PersistentQueueFactory {
+    val live: ZLayer[Any, Nothing, PersistentQueueFactory] =
+      ZLayer.succeed { // ZLayer.fromZIO or ZLayer.scoped
+        new PersistentQueueFactory {
+          def create[A](topic: String): Task[PersistentQueue[A]] =
+            ???
+        }
+      }
+  }
+
   def persistentQueue[A](topic: String): ZSink[PersistentQueueFactory, Throwable, A, Nothing, Unit] =
-    ???
+    ZSink.serviceWithSink[PersistentQueueFactory] { factory =>
+      ???
+    }
 
   def spec =
     suite("Graduation") {
       test("persistentQueue") {
-        assertTrue(false)
+        val stream = ZStream(1, 2, 3, 4, 5)
+        for {
+          _ <- stream.run(persistentQueue("test"))
+        } yield assertTrue(true)
       } @@ ignore
-    }
+    }.provide(PersistentQueueFactory.live)
 }

@@ -13,6 +13,8 @@ import zio.stream._
 import zio.test._
 import zio.test.TestAspect._
 
+// stream >>> pipeline >>> sink
+
 object ConcurrencyOps extends ZIOSpecDefault {
   def spec =
     suite("ConcurrentOps") {
@@ -27,9 +29,9 @@ object ConcurrencyOps extends ZIOSpecDefault {
         val stream = ZStream(1).forever
 
         Live.live(for {
-          size <- stream.runHead
+          size <- stream.runCount.timeout(10.millis)
         } yield assertTrue(size.isEmpty))
-      } @@ ignore +
+      } +
         /**
          * EXERCISE
          *
@@ -42,24 +44,24 @@ object ConcurrencyOps extends ZIOSpecDefault {
           val stream = ZStream.range(0, 10)
 
           for {
-            fibs <- stream.map(fib(_)).runCollect
+            fibs <- stream.mapZIOPar(4)(n => ZIO.succeed(fib(n))).runCollect
           } yield assertTrue(fibs == Chunk(0, 1, 1, 2, 3, 5, 8, 13, 21, 34))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
          * Use `.flatMapPar` to apply the flatMap in parallel.
          */
         test("flatMapPar") {
-          def lookupAge(id: String) =
+          def lookupAge(id: String): ZStream[Any,Option[Nothing],Int] =
             ZStream.fromZIO(ZIO.fromOption(Map("Sherlock" -> 42, "John" -> 43, "Mycroft" -> 48).get(id)))
 
           val stream = ZStream("Sherlock", "John", "Mycroft")
 
           for {
-            ages <- stream.flatMap(lookupAge(_)).runCollect
-          } yield assertTrue(ages == Chunk(42, 43, 48))
-        } @@ ignore +
+            ages <- stream.flatMapPar(4, 16)(lookupAge(_)).runCollect
+          } yield assertTrue(ages.toSet == Set(42, 43, 48))
+        } +
         /**
          * EXERCISE
          *
@@ -75,9 +77,10 @@ object ConcurrencyOps extends ZIOSpecDefault {
             promise <- Promise.make[Nothing, Unit]
             _       <- makeStream(ref).interruptWhen(promise).ensuring(done.succeed(())).runDrain.forkDaemon
             _       <- (ref.get <* ZIO.yieldNow).repeatUntil(_ > 0)
+            _       <- promise.succeed(())
             result  <- done.await.disconnect.timeout(1.second)
           } yield assertTrue(result.isDefined))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -87,10 +90,12 @@ object ConcurrencyOps extends ZIOSpecDefault {
           val stream1 = ZStream("1").forever
           val stream2 = ZStream("2").forever
 
+          // Finalizers should be run in the reverse of the order in which they were acquired
+
           for {
-            values <- stream1.take(10).runCollect
+            values <- stream1.merge(stream2).take(100).runCollect
           } yield assertTrue(values.contains("1") && values.contains("2"))
-        } @@ flaky @@ ignore +
+        } @@ flaky +
         /**
          * EXERCISE
          *
@@ -100,14 +105,17 @@ object ConcurrencyOps extends ZIOSpecDefault {
         test("broadcast") {
           val stream = ZStream(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 
-          def consumer(ref: Ref[Int], stream: ZStream[Any, Nothing, Int]) =
+          def consumer(ref: Ref[Int], stream: ZStream[Any, Nothing, Int]): ZIO[Any,Nothing,Unit] =
             stream.foreach(i => ref.update(_ + i))
 
           for {
             ref <- Ref.make(0)
+            _   <- stream.broadcast(10, 10).flatMap { streams =>
+              ZIO.foreachPar(streams)(consumer(ref, _))
+            }
             v   <- ref.get
           } yield assertTrue(v == 100)
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -115,14 +123,15 @@ object ConcurrencyOps extends ZIOSpecDefault {
          * `ZSink.foldUntil` that sums up every pair of elements.
          */
         test("aggregateAsync(foldUntil(...))") {
-          val stream = ZStream(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+          val stream = ZStream(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
 
-          def sink: ZSink[Any, Nothing, Int, Nothing, Int] = ???
+          def sink: ZSink[Any, Nothing, Int, Int, Int] =
+            ZSink.foldUntil[Int, Int](0, 2)(_ + _)
 
           for {
             values <- stream.aggregateAsync(sink).runCollect
           } yield assertTrue(values == Chunk(1, 5, 9, 13, 17))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *

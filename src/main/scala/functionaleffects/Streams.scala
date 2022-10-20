@@ -60,6 +60,18 @@ object Streaming {
       ???
   }
 
+  // 1. 1000 chunks of 1 element
+
+  // Run 1 ZIO workflow to "open" the stream
+  // Run 1000 ZIO workflows to get the chunks
+  // 1001 ZIO workflows
+
+  // 2. 1 chunk of 1000 elements
+
+  // Run 1 ZIO workflow to "open" the stream
+  // Run 1 ZIO workflow to get the chunk'
+  // 2 ZIO workflows
+
   final case class ZStream[R, E, A](
       pull: ZIO[Scope, Nothing, ZIO[R, Option[E], Chunk[A]]]
   ) {

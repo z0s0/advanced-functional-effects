@@ -572,7 +572,16 @@ object ChunkedStreams extends ZIOSpecDefault {
  * that uses ZIO Streams to perform "word counting" on a provided file.
  */
 object Graduation extends zio.ZIOAppDefault {
-  def wordCount(file: String): IO[IOException, Map[String, Int]] = ???
+  import java.nio.charset.StandardCharsets
+  
+  def wordCount(file: String): IO[Throwable, Map[String, Int]] = {
+    val chars = ZStream.fromFileName(file) >>> ZPipeline.decodeCharsWith(StandardCharsets.UTF_8)
+    val words = chars.split(!_.isLetterOrDigit).map(_.asString)
+    val count = words.runFold(Map.empty[String, Int]) { (acc, w) =>
+      acc + (w -> (acc.getOrElse(w, 0) + 1))
+    }
+    count
+  }
 
   def run =
     getArgs.map(_.headOption).flatMap {
@@ -583,4 +592,73 @@ object Graduation extends zio.ZIOAppDefault {
           _   <- Console.printLine(map.mkString("", "\n", ""))
         } yield ()).exitCode
     }
+}
+
+object NewPipelines {
+
+    /** Uses a given regex to extract matches from input strings, possibly spanning multiple input values.
+    *
+    * Inspired by `ZPipeline.splitLines`, but unlike `splitLines` won't go OOME on huge (or infinite)
+    * streams that for some unfortunate reason have no line separators :)
+    *
+    * Things that won't work reliably, but could be improved:
+    *  - Unbounded regexes like `(?s).*` may go OOME on huge inputs.
+    *  - Lookbehind regexes may not work over input chunk boundaries.
+    */
+  def extractMatches(regex: scala.util.matching.Regex): ZPipeline[Any, Nothing, String, String] = {
+    def run(leftover: String): ZChannel[Any, ZNothing, Chunk[String], Any, Nothing, Chunk[String], Any] = {
+      ZChannel.readWithCause(
+        inChunk => {
+          val fullString = inChunk.foldLeft(leftover)(_ + _)
+          val chunkBuilder = Chunk.newBuilder[String]
+          var leftoverStart = 0
+          regex.findAllMatchIn(fullString)
+            .takeWhile(_.end < fullString.length)
+            .foreach { m =>
+              chunkBuilder.addOne(m.matched)
+              leftoverStart = m.end
+            }
+          val nextLeftover = fullString.substring(leftoverStart)
+          ZChannel.write(chunkBuilder.result()) *> run(nextLeftover)
+        },
+        halt => {
+          ZChannel.write(Chunk.from(regex.findAllIn(leftover))) *> ZChannel.failCause(halt)
+        },
+        done => {
+          ZChannel.write(Chunk.from(regex.findAllIn(leftover))) *> ZChannel.succeed(done)
+        },
+      )
+    }
+
+    run(leftover = "").toPipeline
+  }
+
+  def wordCount(file: String): IO[Throwable, Map[String, Int]] = {
+    ZStream
+      .fromFileName(file)
+      .via(ZPipeline.utf8Decode)
+      .via(extractMatches("\\w+".r))
+      .runFold(Map.empty[String, Int]) { (counts, word) =>
+        counts.updatedWith(word)(c => Some(c.getOrElse(0) + 1))
+      }
+  }
+
+  val stream =
+    ZStream(1, 2, 3)
+
+  stream.map(_ + 1).map(_ * 2)
+  // 2
+  // 4
+  // 3
+  // 6
+  // 4
+  // 8
+
+  List(1, 2, 3).map(_ + 1).map(_ * 2)
+  // 2
+  // 3
+  // 4
+  // 4
+  // 6
+  // 8
 }

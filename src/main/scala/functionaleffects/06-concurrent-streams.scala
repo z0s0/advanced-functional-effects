@@ -142,14 +142,14 @@ object ConcurrencyOps extends ZIOSpecDefault {
         test("aggregateAsync(foldWeighted(...))") {
           val stream = ZStream(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 
-          def sink: ZSink[Any, Nothing, Int, Nothing, Chunk[Int]] =
-            ???
+          def sink: ZSink[Any, Nothing, Int, Int, Chunk[Int]] =
+            ZSink.foldWeighted[Int, Chunk[Int]](Chunk.empty)((_, _) => 1L, 2L)(_ :+ _)
 
           for {
             values <- stream.aggregateAsync(sink).runCollect
           } yield
             assertTrue(values == Chunk(Chunk(0, 1), Chunk(2, 3), Chunk(4, 5), Chunk(6, 7), Chunk(8, 9), Chunk(10)))
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -166,6 +166,6 @@ object ConcurrencyOps extends ZIOSpecDefault {
               values <- stream.aggregateAsyncWithin(sink, Schedule.fixed(5.millis)).runCollect
             } yield assertTrue(values == Chunk(Chunk(0, 1, 2, 3), Chunk(4, 5, 6, 7), Chunk(8, 9, 10)))
           }
-        } @@ flaky @@ ignore
+        } @@ flaky
     }
 }

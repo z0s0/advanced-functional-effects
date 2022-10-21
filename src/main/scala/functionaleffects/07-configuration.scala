@@ -19,6 +19,23 @@ import zio.test.TestAspect._
 
 import scala.concurrent.ExecutionContext
 import java.util.concurrent.atomic.AtomicReference
+import java.io.IOException
+
+object RuntimeExample extends App {
+
+  val sayHello =
+    ZIO.logInfo("Hello, World!")
+
+  val runtime =
+    Runtime.default
+
+  Unsafe.unsafe { implicit unsafe =>
+    runtime.unsafe.run(sayHello)
+  }
+
+// timestamp=2022-10-21T08:23:39.042089Z level=INFO thread=#zio-fiber-0
+// message="Hello, World!" location=zio.advancedfunctionaleffects.config.RuntimeExample.sayHello file=07-configuration.scala line=26
+}
 
 object RuntimeSpec extends ZIOSpecDefault {
   implicit def unsafe: Unsafe = null.asInstanceOf[zio.Unsafe]
@@ -44,16 +61,25 @@ object RuntimeSpec extends ZIOSpecDefault {
        * chosen environment such that this unit test passes.
        */
       test("Runtime") {
-        val effect: ZIO[Int, Nothing, Int] =
+        final case class Port(value: Int)
+        final case class UserId(value: Int)
+        val effect: ZIO[Int & String & Port & UserId, Nothing, Int] =
           for {
-            integer <- ZIO.environment[Int]
+            environment <- ZIO.environment[Int & String & Port & UserId]
+            integer      = environment.get[Int]
+            string       = environment.get[String]
+            port         = environment.get[Port].value
+            userId       = environment.get[UserId].value
             _       <- ZIO.debug(integer)
-          } yield integer.get[Int] * 2
+            _       <- ZIO.debug(string)
+            _       <- ZIO.debug(port)
+            _       <- ZIO.debug(userId)
+          } yield integer * 2
 
-        val runtime = Runtime(ZEnvironment(19), FiberRefs.empty, RuntimeFlags.default)
+        val runtime = Runtime(ZEnvironment(21, "Adam", Port(8080), UserId(1)), FiberRefs.empty, RuntimeFlags.default)
 
         assertTrue(runtime.unsafe.run(effect) == Exit.succeed(42))
-      } @@ ignore +
+      } +
         /**
          * EXERCISE
          *
@@ -77,13 +103,13 @@ object RuntimeSpec extends ZIOSpecDefault {
             throw t
           }
 
-          val runtime = Runtime(ZEnvironment.empty, FiberRefs.empty, RuntimeFlags.default)
+          val runtime = Runtime.unsafe.fromLayer(Runtime.setReportFatal(captureFatal))
 
           try runtime.unsafe.run(ZIO.succeed(throw fatalError))
           catch { case _: Throwable => () }
 
           assertTrue(fatalRef.get.get == fatalError)
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -98,12 +124,12 @@ object RuntimeSpec extends ZIOSpecDefault {
          * unit test will pass.
          */
         test("enableCurrentFiber") {
-          val runtime = Runtime(ZEnvironment.empty, FiberRefs.empty, RuntimeFlags.default)
+          val runtime = Runtime.unsafe.fromLayer(Runtime.enableCurrentFiber)
 
           val option = runtime.unsafe.run(ZIO.attempt(Fiber.currentFiber()(unsafe))).getOrThrowFiberFailure()
 
           assertTrue(option.isDefined)
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -139,12 +165,12 @@ object RuntimeSpec extends ZIOSpecDefault {
             }
           }
 
-          val runtime = Runtime(ZEnvironment.empty, FiberRefs.empty, RuntimeFlags.default)
+          val runtime = Runtime.unsafe.fromLayer(Runtime.setExecutor(executor))
 
-          runtime.unsafe.run(ZIO.yieldNow *> ZIO.unit)
+          runtime.unsafe.run((ZIO.yieldNow *> ZIO.unit))
 
           assertTrue(ranOnEC.get == true)
-        } @@ ignore +
+        } +
         /**
          * EXERCISE
          *
@@ -180,59 +206,67 @@ object RuntimeSpec extends ZIOSpecDefault {
             throw t
           }
 
-          Runtime.default.unsafe.run {
-            ZIO.succeed(throw ioException) // HERE
-          }
+          val runtime = Runtime.unsafe.fromLayer(
+            Runtime.setReportFatal(captureFatal) ++
+              Runtime.addFatal(classOf[Throwable])
+          )
+
+          try {
+            runtime.unsafe.run {
+              ZIO.succeed(throw ioException) // HERE
+            }
+          } catch { case _: Throwable => () }
 
           assertTrue(fatalRef.get.get == ioException)
         }
-    } @@ jvmOnly @@ ignore +
-      /**
-       * EXERCISE
-       *
-       * ZIO's runtime configuration allows specification of a supervisor, which
-       * is an incredibly powerful hook into the runtime system. Supervisors
-       * have direct access into the lifecycle of all fibers launched by the
-       * runtime. This allows them to peek into executing fibers, track metrics,
-       * record timings, restart failed effects, or perform other advanced
-       * functionality.
-       *
-       * NOTE: currently, all supervisors must live inside the ZIO package.
-       *
-       * In this exercise, install a supervisor into the runtime configuration
-       * that allows you to restart all failed fibers.
-       */
-      test("supervisor") {
-        val restartCount = new java.util.concurrent.atomic.AtomicInteger(0)
-        val succeeded    = new java.util.concurrent.atomic.AtomicBoolean(false)
+    } @@ jvmOnly
+    
+    //   /**
+    //    * EXERCISE
+    //    *
+    //    * ZIO's runtime configuration allows specification of a supervisor, which
+    //    * is an incredibly powerful hook into the runtime system. Supervisors
+    //    * have direct access into the lifecycle of all fibers launched by the
+    //    * runtime. This allows them to peek into executing fibers, track metrics,
+    //    * record timings, restart failed effects, or perform other advanced
+    //    * functionality.
+    //    *
+    //    * NOTE: currently, all supervisors must live inside the ZIO package.
+    //    *
+    //    * In this exercise, install a supervisor into the runtime configuration
+    //    * that allows you to restart all failed fibers.
+    //    */
+    //   test("supervisor") {
+    //     val restartCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    //     val succeeded    = new java.util.concurrent.atomic.AtomicBoolean(false)
 
-        val effect =
-          for {
-            count <- ZIO.succeed(restartCount.getAndIncrement())
-            _ <- if (count <= 0) ZIO.dieMessage("Not time to live!")
-                else ZIO.succeed("Time to live!") *> ZIO.succeed(succeeded.set(true))
-          } yield count
+    //     val effect =
+    //       for {
+    //         count <- ZIO.succeed(restartCount.getAndIncrement())
+    //         _ <- if (count <= 0) ZIO.dieMessage("Not time to live!")
+    //             else ZIO.succeed("Time to live!") *> ZIO.succeed(succeeded.set(true))
+    //       } yield count
 
-        lazy val supervisor: Supervisor[Unit] = new Supervisor[Unit] {
-          @volatile var lastEffect = ZIO.unit
+    //     lazy val supervisor: Supervisor[Unit] = new Supervisor[Unit] {
+    //       @volatile var lastEffect = ZIO.unit
 
-          def value(implicit trace: zio.Trace): UIO[Unit] = ZIO.unit
+    //       def value(implicit trace: zio.Trace): UIO[Unit] = ZIO.unit
 
-          def onStart[R, E, A](
-            environment: ZEnvironment[R],
-            effect: ZIO[R, E, A],
-            parent: Option[Fiber.Runtime[Any, Any]],
-            fiber: Fiber.Runtime[E, A]
-          )(implicit unsafe: zio.Unsafe): Unit = lastEffect = effect.asInstanceOf[UIO[Unit]]
+    //       def onStart[R, E, A](
+    //         environment: ZEnvironment[R],
+    //         effect: ZIO[R, E, A],
+    //         parent: Option[Fiber.Runtime[Any, Any]],
+    //         fiber: Fiber.Runtime[E, A]
+    //       )(implicit unsafe: zio.Unsafe): Unit = lastEffect = effect.asInstanceOf[UIO[Unit]]
 
-          def onEnd[R, E, A](value: Exit[E, A], fiber: Fiber.Runtime[E, A])(implicit unsafe: zio.Unsafe): Unit =
-            value.fold(_ => Runtime.default.unsafe.run(lastEffect), _ => ())
-        }
+    //       def onEnd[R, E, A](value: Exit[E, A], fiber: Fiber.Runtime[E, A])(implicit unsafe: zio.Unsafe): Unit =
+    //         value.fold(_ => Runtime.default.unsafe.run(lastEffect), _ => ())
+    //     }
 
-        try Runtime.default.unsafe.run {
-          effect // HERE
-        } catch { case _: Throwable => () }
+    //     try Runtime.default.unsafe.run {
+    //       effect // HERE
+    //     } catch { case _: Throwable => () }
 
-        assertTrue(succeeded.get)
-      } @@ ignore
+    //     assertTrue(succeeded.get)
+    //   }
 }

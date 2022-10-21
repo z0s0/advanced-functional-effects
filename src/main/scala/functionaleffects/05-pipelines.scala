@@ -211,24 +211,57 @@ object Operators extends ZIOSpecDefault {
  * a stream.
  */
 object Graduation extends ZIOSpecDefault {
-  def rechunkWith[A](f: (Chunk[A], Chunk[A]) => (Chunk[A], Chunk[A])): ZPipeline[Any, Nothing, A, A] =
-    ???
+  def rechunkWith[A](
+      f: (Chunk[A], Chunk[A]) => (Seq[Chunk[A]], Chunk[A])
+  ): ZPipeline[Any, Nothing, A, A] = {
+    def loop(
+        leftover: Chunk[A]
+    ): ZChannel[Any, ZNothing, Chunk[A], Any, ZNothing, Chunk[A], Any] = {
+      ZChannel.readWith(
+        (chunk: Chunk[A]) => {
+          val (outChunks, left) = f(leftover, chunk)
+          outChunks.foldRight(loop(left))(ZChannel.write(_) *> _)
+        },
+        (error: ZNothing) =>
+          if (leftover.nonEmpty)
+            ZChannel.write(leftover) *> ZChannel.fail(error)
+          else ZChannel.fail(error),
+        (done: Any) =>
+          if (leftover.nonEmpty)
+            ZChannel.write(leftover) *> ZChannel.succeedNow(done)
+          else ZChannel.succeedNow(done)
+      )
+    }
+    ZPipeline.fromChannel(loop(Chunk.empty[A]))
+  }
 
   def rechunk[A](n: Int): ZPipeline[Any, Nothing, A, A] =
-    rechunkWith {
-      case (leftover, next) =>
-        (leftover ++ next).splitAt(n + 1)
+    rechunkWith { case (leftover, next) =>
+      var fullChunks = Seq.empty[Chunk[A]]
+      var remaining = leftover ++ next
+      while (remaining.size >= n) {
+        val (output, left) = remaining.splitAt(n)
+        fullChunks = fullChunks :+ output
+        remaining = left
+      }
+      fullChunks -> remaining
     }
 
-  // Chunk(1, 2, 3) Chunk(4, 5) Chunk(6)
   def spec =
     suite("Graduation") {
       test("rechunking") {
-        val stream = ZStream.fromChunks(Chunk(1), Chunk(2, 3, 4), Chunk(5), Chunk(6, 7, 8))
+        val stream =
+          ZStream.fromChunks(Chunk(1), Chunk(2, 3, 4), Chunk(5), Chunk(6, 7, 8))
 
         for {
-          values <- (stream >>> rechunk[Int](2)).mapChunks(c => Chunk(c)).runCollect
-        } yield assertTrue(values == Chunk(Chunk(1, 2), Chunk(3, 4), Chunk(5, 6)))
-      } @@ ignore
+          values <- (stream >>> rechunk[Int](2))
+            .mapChunks(c => Chunk(c))
+            .runCollect
+        } yield {
+          assertTrue(
+            values == Chunk(Chunk(1, 2), Chunk(3, 4), Chunk(5, 6), Chunk(7, 8))
+          )
+        }
+      }
     }
 }

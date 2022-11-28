@@ -5,13 +5,13 @@ import zio._
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.global
 
-object Welcome extends App {
+object Welcome extends ZIOAppDefault {
 
   // Functional effects are just descriptions of programs
   //   Execution plans - ZIO / IO / Task
   //   Running computation - Fiber
 
-  val sayHello: ZIO[Any,Nothing,Unit] =
+  val sayHello: ZIO[Any, Nothing, Unit] =
     ZIO.succeed(println("Hello Evolution!"))
 
   val sayHelloFiveTimes =
@@ -19,7 +19,7 @@ object Welcome extends App {
 
   val myWorkflow = {
     ZIO.succeed(println("My log statement")) *>
-    ZIO.succeed(42)
+      ZIO.succeed(42)
   }
 
   val myResourcefulWorkflow =
@@ -34,8 +34,8 @@ object Welcome extends App {
   val zio =
     for {
       fiber <- myResourcefulWorkflow.fork
-      _     <- ZIO.sleep(1.second)
-      _     <- fiber.interrupt
+      _ <- ZIO.sleep(1.second)
+      _ <- fiber.interrupt
     } yield ()
 
   // Acquired resource
@@ -43,5 +43,8 @@ object Welcome extends App {
   // Releasing resource
 
   val run =
-    zio
+    for {
+      fiber <- ZIO.succeed(while (true) { println("won't stop") }).fork
+      _ <- fiber.interrupt
+    } yield ()
 }
